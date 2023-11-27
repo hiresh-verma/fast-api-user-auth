@@ -21,6 +21,11 @@ class CreateUserSchema(UserBaseSchema):
     verified: bool = False
 
 
+class EmailVerifySchema(BaseModel):
+    email: str
+    otp: int
+
+
 class LoginUserSchema(BaseModel):
     email: EmailStr
     password: constr(min_length=8)
@@ -45,5 +50,6 @@ class OtpSchema(BaseModel):
     verified: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime | None = None
+    valid_till = Field(default_factory=lambda: datetime.utcnow() + timedelta(minutes=5))
     retry_after: datetime = Field(default_factory=lambda: datetime.utcnow() + timedelta(minutes=5))
     expires_after: datetime = Field(default_factory=lambda: datetime.utcnow() + timedelta(hours=12))

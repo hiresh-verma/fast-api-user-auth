@@ -62,12 +62,18 @@ def handle_send_otp(user):
         otp_payload.otp = random.randint(10000, 99999)
         otp_payload.updated_at = datetime.utcnow()
         otp_payload.retry_after = datetime.utcnow() + timedelta(minutes=5)
+        otp_payload.valid_till = otp_payload.retry_after
         otp_payload.retries += 1
 
         Otp.find_one_and_update({"_id": otp_obj.get('_id')}, {
             "$set": otp_payload.dict()})
 
         # send otp here
+        # Otp.find_one_and_update({"_id": result.inserted_id}, {
+        #     "$set": {"verification_code": verification_code, "updated_at": datetime.utcnow()}})
+        #
+        # url = f"{request.url.scheme}://{request.client.host}:{request.url.port}/api/auth/verify/email/{token.hex()}"
+        # await Email(user_entity(new_user), url, [EmailStr(payload.email)]).send_verification_code()
     else:
         otp_payload = OtpSchema(email=user.get('email'))
 

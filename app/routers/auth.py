@@ -1,12 +1,9 @@
-import hashlib
-import random
 from datetime import datetime, timedelta
-from random import randbytes
 
 from bson.objectid import ObjectId
 from fastapi import APIRouter, Request, Response, status, Depends, HTTPException
-from pydantic import EmailStr
 
+import app.constants as constants
 from app import oauth2
 from app.database import User, Otp
 from app.serializers.userSerializers import user_entity, user_response_entity
@@ -22,7 +19,7 @@ REFRESH_TOKEN_EXPIRES_IN = settings.REFRESH_TOKEN_EXPIRES_IN
 
 
 @router.post('/register', status_code=status.HTTP_201_CREATED)
-async def create_user(payload: schemas.CreateUserSchema, request: Request):
+async def create_user(payload: schemas.CreateUserSchema, _request: Request):
     # Check if user already exist
     user = User.find_one({'email': payload.email.lower()})
     is_verified = user.get('verified')
@@ -48,62 +45,75 @@ async def create_user(payload: schemas.CreateUserSchema, request: Request):
         payload.updated_at = payload.created_at
 
         result = User.insert_one(payload.dict())
-        new_user = User.find_one({'_id': result.inserted_id})
+        user = User.find_one({'_id': result.inserted_id})
 
-        try:
-
-            auth.handle_send_otp(new_user)
-            # Otp.find_one_and_update({"_id": result.inserted_id}, {
-            #     "$set": {"verification_code": verification_code, "updated_at": datetime.utcnow()}})
-            #
-            # url = f"{request.url.scheme}://{request.client.host}:{request.url.port}/api/auth/verify/email/{token.hex()}"
-            # await Email(user_entity(new_user), url, [EmailStr(payload.email)]).send_verification_code()
-
-        except HTTPException as exc:
-            raise exc
-
-        except Exception as error:
-            User.find_one_and_update({"_id": result.inserted_id}, {
-                "$set": {"verification_code": None, "updated_at": datetime.utcnow()}})
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                                detail='There was an error sending email please try again')
-
-        return {'status': 'success', 'message': 'Verification token successfully sent to your email'}
-
-    else:
+    try:
         auth.handle_send_otp(user)
+    except HTTPException as exc:
+        raise exc
 
-        # try:
-        #     otp = random.randint(10000, 99999)
-        #
-        #     User.update({"$set": {"verification_code": verification_code, "updated_at": datetime.utcnow()}})
-        #
-        #     url = f"{request.url.scheme}://{request.client.host}:{request.url.port}/api/auth/verify/email/{token.hex()}"
-        #     await Email(user_entity(User), url, [EmailStr(payload.email)]).send_verification_code()
-        # except Exception as error:
-        #     User.update({"$set": {"verification_code": None, "updated_at": datetime.utcnow()}})
-        #     raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        #                         detail='There was an error sending email please try again')
+    except Exception as error:
+        print(error)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=constants.ERROR_SEND_EMAIL)
+
+    return {'status': 'success', 'message': constants.SUCCESS_OTP_SENT}
 
 
-@router.get('/verify/email/{token}')
-def verify_me(token: str):
-    hashed_code = hashlib.sha256()
-    hashed_code.update(bytes.fromhex(token))
-    verification_code = hashed_code.hexdigest()
-    result = User.find_one_and_update({"verification_code": verification_code}, {
-        "$set": {"verification_code": None, "verified": True, "updated_at": datetime.utcnow()}}, new=True)
-    if not result:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail='Invalid verification code or account already verified')
-    return {
-        "status": "success",
-        "message": "Account verified successfully"
-    }
+@router.post('/verify/email')
+def verify_me(payload: schemas.EmailVerifySchema, _request: Request):
+    otp_obj = Otp.find_one({'email': payload.email})
+
+    try:
+        if not otp_obj:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                detail=constants.ERROR_OTP_VERIFY)
+
+        otp_payload = schemas.OtpSchema(**otp_obj)
+
+        current_time = datetime.utcnow()
+
+        if current_time > otp_obj.valid_till:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                                detail=constants.ERROR_OTP_EXPIRED)
+
+        if otp_payload.otp != payload.otp:
+            otp_payload.unsuccessful_attempts += 1
+
+            Otp.find_one_and_update({"_id": otp_obj.get('_id')}, {
+                "$set": otp_payload.dict()})
+
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                detail=constants.ERROR_INVALID_OTP)
+
+        result = User.find_one_and_update({"email": payload.email}, {
+            "$set": {"verified": True, "updated_at": datetime.utcnow()}}, new=True)
+
+        if not result:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail=constants.ERROR_VERIFY_USER)
+
+        return {
+            "status": "success",
+            "message": "Account verified successfully"
+        }
+
+    except HTTPException as exc:
+        otp_obj['submission_attempts'] += 1
+
+        Otp.find_one_and_update({"_id": otp_obj.get('_id')}, {
+            "$set": otp_obj})
+
+        raise exc
+
+    except Exception as error:
+        print(error)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=constants.ERROR_SEND_EMAIL)
 
 
 @router.post('/login')
-def login(payload: schemas.LoginUserSchema, response: Response, Authorize: AuthJWT = Depends()):
+def login(payload: schemas.LoginUserSchema, response: Response, authorize: AuthJWT = Depends()):
     # Check if the user exist
     db_user = User.find_one({'email': payload.email.lower()})
     if not db_user:
@@ -122,11 +132,11 @@ def login(payload: schemas.LoginUserSchema, response: Response, Authorize: AuthJ
                             detail='Incorrect Email or Password')
 
     # Create access token
-    access_token = Authorize.create_access_token(
+    access_token = authorize.create_access_token(
         subject=str(user["id"]), expires_time=timedelta(minutes=ACCESS_TOKEN_EXPIRES_IN))
 
     # Create refresh token
-    refresh_jwt_token = Authorize.create_refresh_token(
+    refresh_jwt_token = authorize.create_refresh_token(
         subject=str(user["id"]), expires_time=timedelta(minutes=REFRESH_TOKEN_EXPIRES_IN))
 
     # Store refresh and access tokens in cookie
